@@ -12,6 +12,7 @@
 #include <zephyr/bluetooth/gatt.h>
 #include <zephyr/bluetooth/hci.h>
 #include <bluetooth/services/nus.h>
+#include <zephyr/mgmt/mcumgr/transport/smp_bt.h>
 
 #include <dk_buttons_and_leds.h>
 
@@ -159,6 +160,73 @@ static int uart_init(void)
 	return ret;
 }
 
+static void MTU_exchange_cb(struct bt_conn *conn, uint8_t err, struct bt_gatt_exchange_params *params)
+{
+	if (!err) {
+		LOG_INF("MTU exchange done. %d", bt_gatt_get_mtu(current_conn)-3); 
+	} else {
+		LOG_WRN("MTU exchange failed (err %" PRIu8 ")", err);
+	}
+}
+
+static void request_mtu_exchange(void)
+{	int err;
+	static struct bt_gatt_exchange_params exchange_params;
+	exchange_params.func = MTU_exchange_cb;
+
+	err = bt_gatt_exchange_mtu(current_conn, &exchange_params);
+	if (err) {
+		LOG_WRN("MTU exchange failed (err %d)", err);
+	} else {
+		LOG_INF("MTU exchange pending");
+	}
+}
+
+void mtu_updated(struct bt_conn *conn, uint16_t tx, uint16_t rx)
+{
+	LOG_INF("Updated MTU: TX: %d RX: %d bytes\n", tx, rx);
+}
+
+static struct bt_gatt_cb gatt_callbacks = {.att_mtu_updated = mtu_updated};
+
+static void request_data_len_update(void)
+{
+	int err;
+	err = bt_conn_le_data_len_update(current_conn, BT_LE_DATA_LEN_PARAM_MAX);
+		if (err) {
+			LOG_ERR("LE data length update request failed: %d",  err);
+		}
+}
+static void request_phy_update(void)
+{
+	int err;
+
+	err = bt_conn_le_phy_update(current_conn, BT_CONN_LE_PHY_PARAM_2M);
+		if (err) {
+			LOG_ERR("Phy update request failed: %d",  err);
+		}
+}
+
+#define INTERVAL_MIN  6     
+#define INTERVAL_MAX  6  
+static struct bt_le_conn_param *conn_param = BT_LE_CONN_PARAM(INTERVAL_MIN, INTERVAL_MAX, 0, 400);
+static int update_connection_parameters(void)
+{	
+	int err;
+	err = bt_conn_le_param_update(current_conn, conn_param);
+		if (err) {
+			LOG_ERR("Cannot update conneciton parameter (err: %d)", err);
+			return err;
+		}
+	LOG_INF("Connection parameters update requested");
+	return 0;
+}
+static void conn_params_updated(struct bt_conn *conn, uint16_t interval, uint16_t latency, uint16_t timeout)
+{
+	uint32_t interval_int= interval*1.25;
+	LOG_INF("Conn params updated: interval %d ms, latency %d, timeout: %d0 ms",interval_int, latency, timeout);
+}
+
 static void connected(struct bt_conn *conn, uint8_t err)
 {
 	char addr[BT_ADDR_LE_STR_LEN];
@@ -172,6 +240,10 @@ static void connected(struct bt_conn *conn, uint8_t err)
 	LOG_INF("Connected %s", addr);
 
 	current_conn = bt_conn_ref(conn);
+	update_connection_parameters();
+	request_mtu_exchange();
+	request_data_len_update();
+	request_phy_update();
 
 	dk_set_led_on(CON_STATUS_LED);
 }
@@ -194,6 +266,7 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
 BT_CONN_CB_DEFINE(conn_callbacks) = {
 	.connected    = connected,
 	.disconnected = disconnected,
+	.le_param_updated= conn_params_updated,
 };
 
 static void bt_receive_cb(struct bt_conn *conn, const uint8_t *const data,
@@ -259,12 +332,16 @@ int main(void)
 		error();
 	}
 
+	bt_gatt_cb_register(&gatt_callbacks);
+
     k_sem_give(&ble_init_ok);
 
     err = bt_nus_init(&nus_cb);
 	if (err) {
 		LOG_ERR("Failed to initialize UART service (err: %d)", err);
 	}
+
+	bt_le_adv_stop();
 
     err = bt_le_adv_start(BT_LE_ADV_CONN, ad, ARRAY_SIZE(ad), sd,
 			      ARRAY_SIZE(sd));
